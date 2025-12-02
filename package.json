@@ -1,11 +1,11 @@
 {
   "name": "gemfile-utils",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Update Gemfile versions with ~> constraints",
   "main": "index.js",
   "type": "module",
   "bin": {
-    "update-file": "./index.js"
+    "update": "./index.js"
   },
   "scripts": {
     "start": "node index.js"

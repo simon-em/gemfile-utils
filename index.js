@@ -229,7 +229,7 @@ class GemfileUpdater {
 
 // Main execution
 async function main() {
-  const gemfilePath = process.argv[2] || "Gemfile";
+  const gemfilePath = process.argv[3] || "Gemfile";
 
   if (!fs.existsSync(gemfilePath)) {
     console.error(`Error: ${gemfilePath} not found`);
