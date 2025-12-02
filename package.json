@@ -1,0 +1,17 @@
+{
+  "name": "gemfile-utils",
+  "version": "1.0.0",
+  "description": "Update Gemfile versions with ~> constraints",
+  "main": "index.js",
+  "bin": {
+    "update": "./index.js"
+  },
+  "keywords": [
+    "gemfile",
+    "ruby",
+    "bundler",
+    "version"
+  ],
+  "author": "Simon Talbot (Effet Monstre)",
+  "license": "MIT"
+}
