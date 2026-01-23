@@ -114,7 +114,7 @@ function convertToElixir(val) {
 async function run() {
   await checkElixir();
 
-  const mixFilePath = process.argv[2] || 'mix.exs';
+  const mixFilePath = process.argv[3] || 'mix.exs';
   if (!fs.existsSync(mixFilePath)) {
     console.error(`File not found: ${mixFilePath}`);
     process.exit(1);
