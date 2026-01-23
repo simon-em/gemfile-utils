@@ -1,247 +1,180 @@
 #!/usr/bin/env node
 
-import fs from "fs";
-import https from "https";
+import { execSync } from 'child_process';
+import fs from 'fs';
+import axios from 'axios';
+import semver from 'semver';
 
-const MAJOR_VERSION_AGE_THRESHOLD = 180; // 6 months in days
+const HELPER_PATH = 'scripts/ast_helper.exs';
+const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
+const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
 
-class GemfileUpdater {
-  constructor(gemfilePath = "Gemfile") {
-    this.gemfilePath = gemfilePath;
-    this.gemfileContent = fs.readFileSync(gemfilePath, "utf8");
+async function checkElixir() {
+  try {
+    execSync('elixir --version', { stdio: 'ignore' });
+  } catch (e) {
+    console.error('Elixir is not available. Please install Elixir to use this tool.');
+    process.exit(1);
   }
+}
 
-  async update() {
-    const lines = this.gemfileContent.split("\n");
-    const updatedLines = [];
+function parseDepsFromAST(ast) {
+  return ast.map(item => {
+    let name, version, isTuple = false;
 
-    for (const line of lines) {
-      if (
-        line.trim().startsWith("gem ") &&
-        !(line.includes("#") && line.indexOf("#") < line.indexOf("gem"))
-      ) {
-        const { gemName, currentVersion, hasAltSource } =
-          this.parseGemLine(line);
-
-        if (gemName && !hasAltSource) {
-          console.log(`Processing: ${gemName}`);
-
-          const latestInfo = await this.fetchLatestVersionInfo(gemName);
-
-          if (latestInfo) {
-            const targetVersion = this.determineTargetVersion(
-              currentVersion,
-              latestInfo.latest,
-              latestInfo.majorReleaseDate
-            );
-
-            const newLine = this.buildGemLine(line, gemName, targetVersion);
-            updatedLines.push(newLine);
-
-            console.log(
-              `  ${currentVersion || "unpinned"} -> ~> ${targetVersion}`
-            );
-          } else {
-            updatedLines.push(line);
-            console.log(`  ⚠ Skipped (could not fetch version info)`);
-          }
-        } else {
-          if (hasAltSource) {
-            console.log(`Skipping: ${gemName} (non-RubyGems source)`);
-          }
-          updatedLines.push(line);
-        }
-      } else {
-        updatedLines.push(line);
+    if (item && item["{}"]) {
+      const elements = item["{}"];
+      if (elements[0] && elements[0][":"]) {
+        name = elements[0][":"];
+        version = elements[1];
+        isTuple = true;
       }
     }
 
-    fs.writeFileSync(this.gemfilePath, updatedLines.join("\n"));
-    console.log("\n✓ Gemfile updated successfully!");
-  }
-
-  parseGemLine(line) {
-    // Check for alternative sources (git, github, path, source)
-    const hasAltSource = /\b(git:|github:|path:|source:)/.test(line);
-
-    // Match: gem 'name' or gem "name"
-    const match = line.match(/gem\s+['"]([^'"]+)['"]/);
-    if (!match) {
-      return { gemName: null, currentVersion: null, hasAltSource: false };
+    if (name) {
+      return { name, version, raw: item };
     }
+    return null;
+  }).filter(Boolean);
+}
 
-    const gemName = match[1];
-
-    // Extract version number from any constraint if present
-    let currentVersion = null;
-    const versionMatch = line.match(
-      /['"],\s*['"]([~>=<]*\s*)?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:\.[0-9]+)?)['"]/
-    );
-    if (versionMatch) {
-      currentVersion = versionMatch[2];
-    }
-
-    return { gemName, currentVersion, hasAltSource };
-  }
-
-  fetchLatestVersionInfo(gemName) {
-    return new Promise((resolve) => {
-      const options = {
-        hostname: "rubygems.org",
-        port: 443,
-        path: `/api/v1/versions/${gemName}.json`,
-        method: "GET",
-        rejectUnauthorized: false, // Skip SSL verification
-        timeout: 10000,
-      };
-
-      const req = https.request(options, (res) => {
-        let data = "";
-
-        res.on("data", (chunk) => {
-          data += chunk;
-        });
-
-        res.on("end", () => {
-          if (res.statusCode !== 200) {
-            console.log(
-              `  ⚠ Error fetching info for ${gemName}: HTTP ${res.statusCode}`
-            );
-            resolve(null);
-            return;
-          }
-
-          try {
-            const versions = JSON.parse(data);
-
-            // Filter out prerelease versions
-            const stableVersions = versions.filter((v) => !v.prerelease);
-            if (stableVersions.length === 0) {
-              resolve(null);
-              return;
-            }
-
-            const latest = stableVersions[0];
-            const latestVersion = latest.number;
-
-            // Find the release date of the current major version
-            const majorVersion = parseInt(latestVersion.split(".")[0]);
-            const majorVersions = stableVersions.filter(
-              (v) => parseInt(v.number.split(".")[0]) === majorVersion
-            );
-
-            // Get the oldest release in this major version (first release of major)
-            const majorReleaseDate = new Date(
-              majorVersions[majorVersions.length - 1].created_at
-            );
-
-            resolve({
-              latest: latestVersion,
-              majorReleaseDate: majorReleaseDate,
-            });
-          } catch (e) {
-            console.log(`  ⚠ Error parsing info for ${gemName}: ${e.message}`);
-            resolve(null);
-          }
-        });
-      });
-
-      req.on("error", (e) => {
-        console.log(`  ⚠ Error fetching info for ${gemName}: ${e.message}`);
-        resolve(null);
-      });
-
-      req.on("timeout", () => {
-        req.destroy();
-        console.log(`  ⚠ Timeout fetching info for ${gemName}`);
-        resolve(null);
-      });
-
-      req.end();
-    });
-  }
-
-  determineTargetVersion(currentVersion, latestVersion, majorReleaseDate) {
-    const today = new Date();
-    const daysSinceMajorRelease = Math.floor(
-      (today - majorReleaseDate) / (1000 * 60 * 60 * 24)
-    );
-
-    if (!currentVersion) {
-      // No pinned version - use latest
-      return latestVersion;
-    }
-
-    const currentParts = currentVersion.split(".").map((n) => parseInt(n));
-    const latestParts = latestVersion.split(".").map((n) => parseInt(n));
-
-    const currentMajor = currentParts[0];
-    const latestMajor = latestParts[0];
-
-    // If we're already on the latest major, update to latest version
-    if (currentMajor === latestMajor) {
-      return latestVersion;
-    }
-
-    // Check if latest major version is at least 6 months old
-    if (daysSinceMajorRelease >= MAJOR_VERSION_AGE_THRESHOLD) {
-      // Update to latest major version
-      return latestVersion;
-    } else {
-      // Stay on current major - in a full implementation, we'd fetch the latest minor
-      // For now, return current version
-      return currentVersion;
-    }
-  }
-
-  buildGemLine(originalLine, gemName, version) {
-    // Preserve indentation
-    const indent = originalLine.match(/^\s*/)[0];
-
-    // Detect quote style
-    const quote = originalLine.includes(`'${gemName}'`) ? "'" : '"';
-
-    // Match everything after the gem name
-    const afterGemMatch = originalLine.match(
-      new RegExp(
-        `gem\\s+['"]${gemName.replace(
-          /[.*+?^${}()|[\]\\]/g,
-          "\\$&"
-        )}['"]\\s*(.*)`
-      )
-    );
-    let afterGem = afterGemMatch ? afterGemMatch[1] : "";
-
-    // Remove any existing version constraint
-    afterGem = afterGem.replace(/^,\s*['"][^'"]*['"]/, "");
-
-    // Build the new line
-    let newLine = `${indent}gem ${quote}${gemName}${quote}, ${quote}~> ${version}${quote}`;
-
-    // Add back any remaining options (like require: false, etc.)
-    if (afterGem.trim().length > 0) {
-      newLine += afterGem.trimEnd();
-    }
-
-    return newLine;
+async function getPackageInfo(name) {
+  try {
+    const response = await axios.get(`https://hex.pm/api/packages/${name}`);
+    return response.data;
+  } catch (e) {
+    // console.warn(`Could not fetch info for ${name}: ${e.message}`);
+    return null;
   }
 }
 
-// Main execution
-async function main() {
-  const gemfilePath = process.argv[3] || "Gemfile";
+function selectBestVersion(currentVersionStr, packageInfo) {
+  if (!packageInfo || !packageInfo.releases) return null;
 
-  if (!fs.existsSync(gemfilePath)) {
-    console.error(`Error: ${gemfilePath} not found`);
+  const releases = packageInfo.releases;
+  const now = new Date();
+
+  // Clean current version string (remove ~>, >=, etc.)
+  const currentClean = semver.coerce(currentVersionStr);
+  if (!currentClean) return null;
+
+  let bestVersion = null;
+
+  for (const release of releases) {
+    const ver = release.version;
+    // Skip pre-releases unless current is pre-release (standard behavior)
+    if (semver.prerelease(ver) && !semver.prerelease(currentClean.version)) continue;
+
+    const insertedAt = new Date(release.inserted_at);
+
+    // rule: version must be more than 14 days old
+    if (now - insertedAt < FOURTEEN_DAYS_MS) continue;
+
+    // rule: if major update, major must be more than 6 months old
+    if (semver.major(ver) > semver.major(currentClean)) {
+      // Find the earliest release of this major
+      const firstOfMajor = releases
+        .filter(r => semver.major(r.version) === semver.major(ver))
+        .sort((a, b) => new Date(a.inserted_at) - new Date(b.inserted_at))[0];
+
+      const firstMajorDate = new Date(firstOfMajor.inserted_at);
+      if (now - firstMajorDate < SIX_MONTHS_MS) continue;
+    }
+
+    // We want the most recent (highest) version satisfying conditions
+    if (!bestVersion || semver.gt(ver, bestVersion)) {
+      bestVersion = ver;
+    }
+  }
+
+  if (bestVersion && semver.gt(bestVersion, currentClean)) {
+    return bestVersion;
+  }
+  return null;
+}
+
+function convertToElixir(val) {
+  if (val === null) return "nil";
+  if (val === true) return "true";
+  if (val === false) return "false";
+  if (typeof val === "string") return `"${val}"`;
+  if (typeof val === "number") return val.toString();
+  if (typeof val === "object") {
+    if (val[":"]) return `:${val[":"]}`;
+    if (val["{}"]) {
+      return "{" + val["{}"].map(convertToElixir).join(", ") + "}";
+    }
+  }
+  if (Array.isArray(val)) {
+    return "[" + val.map(convertToElixir).join(", ") + "]";
+  }
+  return val.toString();
+}
+
+async function run() {
+  await checkElixir();
+
+  const mixFilePath = process.argv[2] || 'mix.exs';
+  if (!fs.existsSync(mixFilePath)) {
+    console.error(`File not found: ${mixFilePath}`);
     process.exit(1);
   }
 
-  console.log(`Updating ${gemfilePath}...\n`);
-  const updater = new GemfileUpdater(gemfilePath);
-  await updater.update();
+  const astJson = execSync(`elixir ${HELPER_PATH} dump ${mixFilePath}`, { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] }).split('\n').filter(l => l.startsWith('[')).pop();
+  if (!astJson) {
+    console.error('Could not get AST from Elixir');
+    process.exit(1);
+  }
+
+  const ast = JSON.parse(astJson);
+  const deps = parseDepsFromAST(ast);
+  const updatedAST = JSON.parse(JSON.stringify(ast));
+
+  let updatesFound = false;
+  process.stdout.write(`Checking ${deps.length} dependencies...`);
+
+  for (let i = 0; i < deps.length; i++) {
+    const dep = deps[i];
+    if (typeof dep.version !== 'string' || !dep.version.match(/[0-9]/)) continue;
+
+    const info = await getPackageInfo(dep.name);
+    if (!info) continue;
+
+    const best = selectBestVersion(dep.version, info);
+
+    if (best) {
+      console.log(`\nUpdate ${dep.name}: ${dep.version} -> ~> ${best}`);
+      updatesFound = true;
+
+      const newVersionStr = `~> ${best}`;
+
+      // Update in AST
+      for (let j = 0; j < updatedAST.length; j++) {
+        let item = updatedAST[j];
+        if (item && item["{}"]) {
+          const elements = item["{}"];
+          if (elements[0] && elements[0][":"] === dep.name) {
+            elements[1] = newVersionStr;
+          }
+        }
+      }
+    } else {
+      process.stdout.write('.');
+    }
+  }
+  console.log();
+
+  if (updatesFound) {
+    const elixirStr = convertToElixir(updatedAST);
+    // Using temporary file for the data to avoid shell escaping issues with long strings
+    const dataPath = 'temp_deps.exs';
+    fs.writeFileSync(dataPath, elixirStr);
+    execSync(`elixir ${HELPER_PATH} update ${mixFilePath} "$(cat ${dataPath})"`);
+    fs.unlinkSync(dataPath);
+    console.log('mix.exs updated successfully.');
+  } else {
+    console.log('All dependencies are up to date (given the constraints).');
+  }
 }
 
-main().catch((err) => {
-  console.error("Error:", err);
-  process.exit(1);
-});
+run().catch(console.error);
