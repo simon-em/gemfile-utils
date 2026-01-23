@@ -2,10 +2,14 @@
 
 import { execSync } from 'child_process';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import axios from 'axios';
 import semver from 'semver';
 
-const HELPER_PATH = 'scripts/ast_helper.exs';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const HELPER_PATH = path.join(__dirname, 'scripts/ast_helper.exs');
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
 const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
 
